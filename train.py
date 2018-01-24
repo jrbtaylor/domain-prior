@@ -43,7 +43,6 @@ def fit(train_loader, val_loader, model, exp_path, loss_fcn, optimizer='adam',
         stall = len(stats['loss']['val'])-np.argmin(stats['loss']['val'])-1
         start_epoch = len(stats['loss']['val'])-1
         print('Resuming from epoch %i'%start_epoch)
-        model = torch.load(os.path.join(exp_path, 'best_checkpoint'))
 
     def epoch(dataloader,training):
         bar = ProgressBar()
@@ -63,9 +62,9 @@ def fit(train_loader, val_loader, model, exp_path, loss_fcn, optimizer='adam',
             # track accuracy
             output = output.data.cpu().numpy()
             output_argmax = np.argmax(output,axis=-1)
-            int_label = np.argmax(y.data.cpu().numpy(),axis=-1)
+            int_label = y.data.cpu().numpy()
             correct = np.sum(int_label==output_argmax)
-            accuracy += correct/int_label.shape[0]
+            accuracy.append(correct/int_label.shape[0])
             if training:
                 loss.backward()
                 optimizer.step()
@@ -89,7 +88,7 @@ def fit(train_loader, val_loader, model, exp_path, loss_fcn, optimizer='adam',
         time_per_example = (time.time()-t0)/len(val_loader.dataset)
         stats['loss']['val'].append(loss)
         stats['accuracy']['val'].append(acc)
-        print(('            Validation loss = %6.4f    mean output = %2.2f    '
+        print(('            Validation loss = %6.4f    accuracy = %2.2f    '
                '%4.2f msec/example')%(loss,acc*100,time_per_example*1000))
 
         # Save stats and update training curves
