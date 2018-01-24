@@ -70,3 +70,12 @@ def tile_images(imgs,r=0):
     imgs = np.concatenate(imgs,1)
     imgs = np.concatenate(imgs,1)
     return imgs
+
+
+def histogram(y,edges,title,savepath):
+    plt.Figure()
+    plt.hist(y,edges)
+    plt.title(title)
+    plt.savefig(os.path.join(savepath,title.replace(' ','_')+'.png'))
+    plt.close()
+

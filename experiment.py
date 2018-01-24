@@ -11,12 +11,13 @@ import torch
 from torch.autograd import Variable
 
 import data
-from model import VGG
+import model
 import train
+import vis
 
 def run(pixelcnn_ckpt, vgg_ckpt=None, adversarial_range=0.2,
-        train_dataset='mnist', test_dataset='emnist', n_classes=10, img_size=28,
-        vgg_params={'batch_size':64, 'base_f':16, 'n_layers':7, 'dropout':0.5,
+        train_dataset='mnist', test_dataset='emnist', img_size=28,
+        vgg_params={'batch_size':32, 'base_f':16, 'n_layers':7, 'dropout':0.8,
                     'optimizer':'adam','learnrate':1e-4, 'dropout':0.5},
         exp_name='domain-prior', exp_dir='~/experiments/domain-prior/',
         cuda=True, resume=False):
@@ -31,12 +32,17 @@ def run(pixelcnn_ckpt, vgg_ckpt=None, adversarial_range=0.2,
 
     # Train a VGG classifier if not already done
     if vgg_ckpt is None:
-        with open(os.path.join(exp_dir,'vgg_params.json'),'w') as f:
-            json.dump(vgg_params,f)
-        vgg = VGG(img_size, 1, vgg_params['base_f'], vgg_params['n_layers'],
-                  n_classes, vgg_params['dropout'])
-        train_loader, val_loader = data.loader(train_dataset,
-                                               vgg_params['batch_size'])
+        train_loader, val_loader, n_classes = data.loader(
+            train_dataset,vgg_params['batch_size'])
+        if not resume:
+            with open(os.path.join(exp_dir,'vgg_params.json'),'w') as f:
+                json.dump(vgg_params,f)
+            vgg = model.VGG(img_size, 1, vgg_params['base_f'],
+                            vgg_params['n_layers'], n_classes,
+                            vgg_params['dropout'])
+        else:
+            vgg = torch.load(os.path.join(exp_dir, 'best_checkpoint'))
+
         train.fit(train_loader, val_loader, vgg, exp_dir, torch.nn.NLLLoss(),
                   vgg_params['optimizer'], vgg_params['learnrate'], cuda,
                   resume=resume)
@@ -44,71 +50,260 @@ def run(pixelcnn_ckpt, vgg_ckpt=None, adversarial_range=0.2,
         vgg = torch.load(vgg_ckpt)
 
     pixelcnn = torch.load(pixelcnn_ckpt)
-    pixelcnn_params = os.path.join(os.path.dirname(pixelcnn_ckpt),'params')
+    pixelcnn_params = os.path.join(os.path.dirname(pixelcnn_ckpt),'params.json')
     with open(pixelcnn_params,'r') as f:
         pixelcnn_params = json.load(f)
     n_bins = pixelcnn_params['n_bins']
+
+    if cuda:
+        vgg = vgg.cuda()
+        pixelcnn = pixelcnn.cuda()
 
     # Run the datasets through the networks and calculate 3 pixelcnn losses:
     # 1. Average: mean across the image
     # 2. High-pass filtered: weight by difference to upper- and left- neighbors
     # 3. Saliency: weight by pixel saliency (vgg backprop-to-input)
-    _,loader = data.loader(train_dataset,16)
-    domain_losses = calc_losses(vgg,pixelcnn,loader,n_bins,cuda)
-    _,loader = data.loader(test_dataset,16)
-    external_losses = calc_losses(vgg,pixelcnn,loader,n_bins,cuda)
+    _,loader,_ = data.loader(train_dataset,1)
+    print('Calculating losses for '+train_dataset)
+    dom_avg,dom_hp,dom_sw,dom_sal,dom_var = calc_losses(
+        vgg,pixelcnn,loader,n_bins,cuda)
+    print('Calculating losses for adversarial images')
+    adv_avg,adv_hp,adv_sw,adv_sal,adv_var = adversarial(
+        vgg,pixelcnn,loader,n_bins,adversarial_range,cuda)
+    _,loader,_ = data.loader(test_dataset,1)
+    print('Calculating losses for '+test_dataset)
+    ext_avg,ext_hp,ext_sw,ext_sal,ext_var = calc_losses(
+        vgg,pixelcnn,loader,n_bins,cuda)
 
+    # Loss histograms
+    n_bins = 100
+    all_losses = np.concatenate((dom_avg, adv_avg, ext_avg,
+                                 dom_hp, adv_hp, ext_hp,
+                                 dom_sw, adv_sw, ext_sw))
+    edges = np.linspace(0, np.percentile(all_losses,95), n_bins+1)
+    # average loss
+    vis.histogram(dom_avg, edges, train_dataset+' average loss', exp_dir)
+    vis.histogram(adv_avg, edges, 'adversarial average loss', exp_dir)
+    vis.histogram(ext_avg, edges, test_dataset+' average loss', exp_dir)
+    # high-pass weighted loss
+    vis.histogram(dom_hp, edges, train_dataset+' highpass loss', exp_dir)
+    vis.histogram(adv_hp, edges, 'adversarial highpass loss', exp_dir)
+    vis.histogram(ext_hp, edges, test_dataset+' highpass loss', exp_dir)
+    # saliency weighted loss
+    vis.histogram(dom_sw, edges, train_dataset+' saliency loss', exp_dir)
+    vis.histogram(adv_sw, edges, 'adversarial saliency loss', exp_dir)
+    vis.histogram(ext_sw, edges, test_dataset+' saliency loss', exp_dir)
+    # loss variances
+    loss_variances = np.concatenate((dom_var,adv_var,ext_var))
+    edges = np.linspace(0, np.percentile(loss_variances, 95), n_bins+1)
+    vis.histogram(dom_var, edges, train_dataset+' loss variance', exp_dir)
+    vis.histogram(adv_var, edges, 'adversarial loss variance', exp_dir)
+    vis.histogram(ext_var, edges, test_dataset+' loss variance', exp_dir)
 
-    # TO-DO: add adversarial examples
+    # Calculate epistemic uncertainties for each dataset for each model
+    _, loader, _ = data.loader(train_dataset, 1)
+    dom_class_epi = epistemic(vgg, loader, cuda)
+    dom_prior_epi = epistemic(pixelcnn, loader, cuda)
+    adv_class_epi = epistemic_adversarial(vgg, adversarial_range, vgg,
+                                          loader, cuda)
+    adv_prior_epi = epistemic_adversarial(vgg, adversarial_range, pixelcnn,
+                                          loader, cuda)
+    _, loader, _ = data.loader(test_dataset, 1)
+    ext_class_epi = epistemic(vgg, loader, cuda)
+    ext_prior_epi = epistemic(pixelcnn, loader, cuda)
 
+    # Classifier uncertainty histograms
+    n_bins = 100
+    all_class_epi = np.concatenate(dom_class_epi,adv_class_epi,ext_class_epi)
+    edges = np.linspace(0, np.percentile(all_class_epi,95), n_bins+1)
+    vis.histogram(dom_class_epi, edges, train_dataset+' classifier uncertainty',
+                  exp_dir)
+    vis.histogram(adv_class_epi, edges, 'adversarial classifier uncertainty',
+                  exp_dir)
+    vis.histogram(ext_class_epi, edges, test_dataset+' classifier uncertainty',
+                  exp_dir)
+
+    # Prior uncertainty histograms
+    n_bins = 100
+    all_prior_epi = np.concatenate(dom_prior_epi, adv_prior_epi, ext_prior_epi)
+    edges = np.linspace(0, np.percentile(all_prior_epi, 95), n_bins+1)
+    vis.histogram(dom_prior_epi, edges, train_dataset+' pixelcnn uncertainty',
+                  exp_dir)
+    vis.histogram(adv_prior_epi, edges, 'adversarial pixelcnn uncertainty',
+                  exp_dir)
+    vis.histogram(ext_prior_epi, edges, test_dataset+' pixelcnn uncertainty',
+                  exp_dir)
 
 
 def calc_losses(vgg, pixelcnn, dataloader, n_bins, cuda=True):
-    bar = ProgressBar()
-    loss_fcn = torch.nn.NLLLoss2d()
     avg_losses = []
     hpf_losses = []
     sal_losses = []
+    var_losses = []
+    sal_maps = []
+
+    vgg.eval()
+    pixelcnn.eval()
+
+    bar = ProgressBar()
+    for x,_ in bar(dataloader):
+        pcnn_label = torch.squeeze(
+            torch.round((n_bins-1)*x).type(torch.LongTensor), 1)
+        if cuda:
+            x = x.cuda()
+        x = Variable(x, requires_grad=True)
+
+        # get the saliency maps
+        classifier_output = vgg(x)
+        dx = torch.autograd.grad(classifier_output.sum(),x,create_graph=True)[0]
+        saliency = dx.data.cpu().numpy()
+        vgg.zero_grad()
+
+        # calculate pixelcnn loss
+        pcnn_out = np.squeeze(pixelcnn(x, classifier_output).data.cpu().numpy(),
+                              0)
+        pcnn_out = np.transpose(pcnn_out, [1, 2, 0])
+        pcnn_label = np.squeeze(pcnn_label.numpy(), 0)
+        r, c = np.meshgrid(range(pcnn_out.shape[0]), range(pcnn_out.shape[1]),
+                           indexing='ij')
+        loss = -pcnn_out[r, c, pcnn_label]  # per-pixel negative log-likelihood
+
+        avg_loss = np.mean(loss)
+        var_loss = np.var(loss)
+
+        weight = x.data.cpu().numpy()
+        weight = np.abs(weight[:, :, 1:, 1:]-0.5*(
+            weight[:, :, :-1, 1:]+weight[:, :, 1:, :-1]))
+        weight = np.pad(weight, ((0, 0), (0, 0), (1, 0), (1, 0)), 'constant',
+                        constant_values=0)
+        weight = weight/(np.sum(weight, axis=(1,2,3), keepdims=True)+1e-9)
+        hpf_loss = np.sum(loss*weight)
+
+        saliency = np.abs(saliency)
+        saliency = saliency/(np.sum(saliency, axis=(1,2,3), keepdims=True)+1e-9)
+        sal_loss = np.sum(loss*saliency)
+
+        avg_losses.append(avg_loss)
+        hpf_losses.append(hpf_loss)
+        sal_losses.append(sal_loss)
+        sal_maps.append(saliency)
+        var_losses.append(var_loss)
+    vis.clearline()
+
+    return avg_losses, hpf_losses, sal_losses, sal_maps, var_losses
+
+
+def adversarial(vgg, pixelcnn, dataloader, n_bins, adversarial_range,
+                cuda=True):
+    avg_losses = []
+    hpf_losses = []
+    sal_losses = []
+    var_losses = []
+    sal_maps = []
+
+    vgg.eval()
+    pixelcnn.eval()
+
+    bar = ProgressBar()
     for x,y in bar(dataloader):
         pcnn_label = torch.squeeze(
             torch.round((n_bins-1)*x).type(torch.LongTensor), 1)
         if cuda:
-            x,y = x.cuda(),y.cuda()
-            pcnn_label = pcnn_label.cuda()
-            vgg = vgg.cuda()
-            pixelcnn = pixelcnn.cuda()
-        x,y = Variable(x,requires_grad=True), Variable(y)
-        vgg.eval()
-        pixelcnn.eval()
+            x,y = x.cuda(), y.cuda()
+        x,y = Variable(x, requires_grad=True), Variable(y)
+
+        # generate adversarial example
+        loss = torch.nn.NLLLoss2d()(vgg(x),y)
+        dx = torch.autograd.grad(loss,x,create_graph=True)[0]
+        adv_x = x+adversarial_range*torch.sign(dx)
 
         # get the saliency maps
-        classifier_output = vgg(x)
-        classifier_argmax = np.argmax(classifier_output.data.cpu().numpy(),-1)
-        classifer_max = classifier_output[range(len(classifier_argmax)),
-                                          classifier_argmax]
-        saliency = classifer_max.backward(retain_variables=True)
-        saliency = saliency.data.cpu().numpy()
+        classifier_output = vgg(adv_x)
+        dx = torch.autograd.grad(
+            classifier_output.sum(),adv_x,create_graph=True)[0]
+        saliency = dx.data.cpu().numpy()
+        vgg.zero_grad()
 
-        pcnn_out = pixelcnn(x,classifier_output)
-        loss = loss_fcn(pcnn_out,pcnn_label).data.cpu().numpy()
+        # calculate pixelcnn loss
+        pcnn_out = np.squeeze(
+            pixelcnn(adv_x, classifier_output).data.cpu().numpy(),0)
+        pcnn_out = np.transpose(pcnn_out, [1, 2, 0])
+        pcnn_label = np.squeeze(pcnn_label.numpy(), 0)
+        r, c = np.meshgrid(range(pcnn_out.shape[0]), range(pcnn_out.shape[1]),
+                           indexing='ij')
+        loss = -pcnn_out[r, c, pcnn_label]  # per-pixel negative log-likelihood
 
-        avg_losses += np.mean(loss,axis=-1).tolist()
+        avg_loss = np.mean(loss)
+        var_loss = np.var(loss)
 
-        weight = x.data.cpu().numpy()
-        weight = np.abs(weight[:,:,1:,1:]-0.5*(weight[:,:,:-1,1:]
-                                               +weight[:,:,1:,:-1]))
-        weight = weight/np.sum(weight,axis=[1,2,3],keepdims=True)
-        hpf_losses += np.sum(loss*weight)
+        weight = adv_x.data.cpu().numpy()
+        weight = np.abs(weight[:, :, 1:, 1:]-0.5*(
+            weight[:, :, :-1, 1:]+weight[:, :, 1:, :-1]))
+        weight = np.pad(weight, ((0, 0), (0, 0), (1, 0), (1, 0)), 'constant',
+                        constant_values=0)
+        weight = weight/np.sum(weight, axis=(1, 2, 3), keepdims=True)
+        hpf_loss = np.sum(loss*weight)
 
-        saliency = saliency/np.sum(saliency,axis=[1,2,3],keepdims=True)
-        sal_losses += np.sum(loss*saliency)
+        saliency = saliency/np.sum(saliency, axis=(1, 2, 3), keepdims=True)
+        sal_loss = np.sum(loss*saliency)
 
-    return avg_losses, hpf_losses, sal_losses
+        avg_losses.append(avg_loss)
+        hpf_losses.append(hpf_loss)
+        sal_losses.append(sal_loss)
+        sal_maps.append(saliency)
+        var_losses.append(var_loss)
+    vis.clearline()
+
+    return avg_losses, hpf_losses, sal_losses, sal_maps, var_losses
 
 
+def epistemic(model, dataloader, cuda=True, trials=20):
+    # need to set model to train so dropout
+    # note: effects batchnorm but ignore for now & hope it's negligible
+    model.train()
+
+    uncertainties = []
+    bar = ProgressBar()
+    for x,_ in bar(dataloader):
+        if cuda:
+            x = x.cuda()
+        x = Variable(x)
+
+        # replicate the input to monte carlo sample the dropout results
+        print(x.size())
+        x = x.expand(trials,-1)
+        print(x.size())
+        model_output = model(x).data.cpu().numpy()
+
+        # take the mean (over the non-batch/dropout dims) of the variance
+        uncertainties.append(np.sqrt(np.mean(np.var(model_output,axis=0))))
+    return uncertainties
 
 
+def epistemic_adversarial(classifier, adversarial_range, model, dataloader,
+                          cuda=True, trials=20):
+    # need to set model to train so dropout
+    # note: effects batchnorm but ignore for now & hope it's negligible
+    model.train()
+    classifier.eval()
 
+    uncertainties = []
+    bar = ProgressBar()
+    for x,y in bar(dataloader):
+        if cuda:
+            x,y = x.cuda(), y.cuda()
+        x,y = Variable(x, requires_grad=True), Variable(y)
 
+        # find the adversarial version of x
+        loss = torch.nn.NLLLoss2d()(classifier(x), y)
+        dx = torch.autograd.grad(loss, x, create_graph=True)[0]
+        x = x+adversarial_range*torch.sign(dx)
 
-
+        # replicate the input to monte carlo sample the dropout results
+        print(x.size())
+        x = x.expand(trials, -1)
+        print(x.size())
+        model_output = model(x).data.cpu().numpy()
+        # take the mean (over the non-batch/dropout dims) of the variance
+        uncertainties.append(np.sqrt(np.mean(np.var(model_output, axis=0))))
+    return uncertainties
