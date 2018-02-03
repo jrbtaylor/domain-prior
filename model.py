@@ -7,7 +7,7 @@ import torch
 import torch.nn as nn
 
 class VGG(nn.Module):
-    def __init__(self, img_size, n_in, base_f, n_layers, n_out):
+    def __init__(self, img_size, n_in, base_f, n_layers, n_out, dropout=0.5):
         super(VGG,self).__init__()
 
         # automatically insert pooling so final feature map is at least 4x4
@@ -38,13 +38,12 @@ class VGG(nn.Module):
         self.n_flatten = n_feat[-1]*int(img_size/2**n_pools)**2
         n_feat = [self.n_flatten,self.n_flatten//4,n_out]
         for i in range(len(n_feat)-1):
-            bn = nn.BatchNorm1d(n_feat[i],momentum=0.1)
             proj = nn.Linear(n_feat[i],n_feat[i+1])
             if i==len(n_feat)-2:
                 act = nn.LogSoftmax(dim=1)
             else:
                 act = nn.ReLU()
-            layer = nn.Sequential(bn, proj, act)
+            layer = nn.Sequential(nn.Dropout2d(dropout), proj, act)
             self.fc_layers.append(layer)
         self.fc_layers = nn.Sequential(*self.fc_layers)
 
