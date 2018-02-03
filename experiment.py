@@ -17,8 +17,8 @@ import vis
 
 def run(pixelcnn_ckpt, vgg_ckpt=None, adversarial_range=0.2,
         train_dataset='mnist', test_dataset='emnist', img_size=28,
-        vgg_params={'batch_size':32, 'base_f':16, 'n_layers':7, 'dropout':0.8,
-                    'optimizer':'adam','learnrate':1e-4, 'dropout':0.5},
+        vgg_params={'batch_size':16, 'base_f':16, 'n_layers':9, 'dropout':0.8,
+                    'optimizer':'adam','learnrate':1e-4},
         exp_name='domain-prior', exp_dir='~/experiments/domain-prior/',
         cuda=True, resume=False):
 
@@ -103,18 +103,13 @@ def run(pixelcnn_ckpt, vgg_ckpt=None, adversarial_range=0.2,
     # Calculate epistemic uncertainties for each dataset for each model
     _, loader, _ = data.loader(train_dataset, 1)
     dom_class_epi = epistemic(vgg, loader, cuda)
-    dom_prior_epi = epistemic(pixelcnn, loader, cuda)
-    adv_class_epi = epistemic_adversarial(vgg, adversarial_range, vgg,
-                                          loader, cuda)
-    adv_prior_epi = epistemic_adversarial(vgg, adversarial_range, pixelcnn,
-                                          loader, cuda)
+    adv_class_epi = epistemic_adversarial(vgg, adversarial_range, loader, cuda)
     _, loader, _ = data.loader(test_dataset, 1)
     ext_class_epi = epistemic(vgg, loader, cuda)
-    ext_prior_epi = epistemic(pixelcnn, loader, cuda)
 
     # Classifier uncertainty histograms
     n_bins = 100
-    all_class_epi = np.concatenate(dom_class_epi,adv_class_epi,ext_class_epi)
+    all_class_epi = dom_class_epi+adv_class_epi+ext_class_epi
     edges = np.linspace(0, np.percentile(all_class_epi,95), n_bins+1)
     vis.histogram(dom_class_epi, edges, train_dataset+' classifier uncertainty',
                   exp_dir)
@@ -123,16 +118,17 @@ def run(pixelcnn_ckpt, vgg_ckpt=None, adversarial_range=0.2,
     vis.histogram(ext_class_epi, edges, test_dataset+' classifier uncertainty',
                   exp_dir)
 
-    # Prior uncertainty histograms
-    n_bins = 100
-    all_prior_epi = np.concatenate(dom_prior_epi, adv_prior_epi, ext_prior_epi)
-    edges = np.linspace(0, np.percentile(all_prior_epi, 95), n_bins+1)
-    vis.histogram(dom_prior_epi, edges, train_dataset+' pixelcnn uncertainty',
-                  exp_dir)
-    vis.histogram(adv_prior_epi, edges, 'adversarial pixelcnn uncertainty',
-                  exp_dir)
-    vis.histogram(ext_prior_epi, edges, test_dataset+' pixelcnn uncertainty',
-                  exp_dir)
+    # ROC curves
+    vis.roc(dom_avg, ext_avg, 'out-of-domain: average loss', exp_dir)
+    vis.roc(dom_hp, ext_hp, 'out-of-domain: high-pass filtered loss', exp_dir)
+    vis.roc(dom_sw, ext_sw, 'out-of-domain: saliency-weighted loss', exp_dir)
+    vis.roc(dom_class_epi, ext_class_epi,
+            'out-of-domain: epistemic uncertainty', exp_dir)
+    vis.roc(dom_avg, adv_avg, 'adversarial: average loss', exp_dir)
+    vis.roc(dom_hp, adv_hp, 'adversarial: high-pass filtered loss', exp_dir)
+    vis.roc(dom_sw, adv_sw, 'adversarial: saliency-weighted loss', exp_dir)
+    vis.roc(dom_class_epi, adv_class_epi,
+            'adversarial: epistemic uncertainty', exp_dir)
 
 
 def calc_losses(vgg, pixelcnn, dataloader, n_bins, cuda=True):
@@ -258,21 +254,19 @@ def adversarial(vgg, pixelcnn, dataloader, n_bins, adversarial_range,
 
 
 def epistemic(model, dataloader, cuda=True, trials=20):
-    # need to set model to train so dropout
+    # need to set model to train for dropout
     # note: effects batchnorm but ignore for now & hope it's negligible
     model.train()
 
     uncertainties = []
     bar = ProgressBar()
     for x,_ in bar(dataloader):
+        # replicate the input to monte carlo sample the dropout results
+        x = x.expand(trials, x.size()[1], x.size()[2], x.size()[3])
         if cuda:
             x = x.cuda()
         x = Variable(x)
 
-        # replicate the input to monte carlo sample the dropout results
-        print(x.size())
-        x = x.expand(trials,-1)
-        print(x.size())
         model_output = model(x).data.cpu().numpy()
 
         # take the mean (over the non-batch/dropout dims) of the variance
@@ -280,29 +274,27 @@ def epistemic(model, dataloader, cuda=True, trials=20):
     return uncertainties
 
 
-def epistemic_adversarial(classifier, adversarial_range, model, dataloader,
+def epistemic_adversarial(model, adversarial_range, dataloader,
                           cuda=True, trials=20):
     # need to set model to train so dropout
     # note: effects batchnorm but ignore for now & hope it's negligible
     model.train()
-    classifier.eval()
 
     uncertainties = []
     bar = ProgressBar()
     for x,y in bar(dataloader):
+        # replicate the input to monte carlo sample the dropout results
+        x = x.expand(trials, x.size()[1], x.size()[2], x.size()[3])
+        y = y.expand(trials)
         if cuda:
             x,y = x.cuda(), y.cuda()
         x,y = Variable(x, requires_grad=True), Variable(y)
 
         # find the adversarial version of x
-        loss = torch.nn.NLLLoss2d()(classifier(x), y)
+        loss = torch.nn.NLLLoss2d()(model(x), y)
         dx = torch.autograd.grad(loss, x, create_graph=True)[0]
         x = x+adversarial_range*torch.sign(dx)
 
-        # replicate the input to monte carlo sample the dropout results
-        print(x.size())
-        x = x.expand(trials, -1)
-        print(x.size())
         model_output = model(x).data.cpu().numpy()
         # take the mean (over the non-batch/dropout dims) of the variance
         uncertainties.append(np.sqrt(np.mean(np.var(model_output, axis=0))))

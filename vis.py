@@ -79,3 +79,21 @@ def histogram(y,edges,title,savepath):
     plt.savefig(os.path.join(savepath,title.replace(' ','_')+'.png'))
     plt.close()
 
+
+def roc(x1,x0,title,savepath,n_samples=1000):
+    # Save an ROC curve for true (x1) and false (x0) lists of scalars
+    x1,x0 = np.array(x1),np.array(x0)
+    thresholds = [0.99*np.min([np.min(x0),np.min(x1)]),
+                  1.01*np.max([np.max(x0),np.max(x1)])]
+    thresholds = np.linspace(thresholds[0],thresholds[1],n_samples)
+    true_pos = [np.sum(x1<thr)/x1.size for thr in thresholds]
+    false_pos = [np.sum(x0<thr)/x0.size for thr in thresholds]
+
+    plt.Figure()
+    plt.plot(false_pos,true_pos)
+    plt.xlabel('false positive rate')
+    plt.ylabel('true positive rate')
+    plt.title(title)
+    plt.savefig(os.path.join(savepath,
+                             title.replace(' ','_').replace(':','__')+'.png'))
+    plt.close()
