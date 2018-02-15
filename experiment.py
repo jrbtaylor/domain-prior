@@ -43,9 +43,9 @@ def run(pixelcnn_ckpt, vgg_ckpt=None, adversarial_range=0.2,
         else:
             vgg = torch.load(os.path.join(exp_dir, 'best_checkpoint'))
 
-        train.fit(train_loader, val_loader, vgg, exp_dir, torch.nn.NLLLoss(),
-                  vgg_params['optimizer'], vgg_params['learnrate'], cuda,
-                  resume=resume)
+        train.fit(train_loader, val_loader, vgg, exp_dir,
+                  torch.nn.CrossEntropyLoss(), vgg_params['optimizer'],
+                  vgg_params['learnrate'], cuda, resume=resume)
     else:
         vgg = torch.load(vgg_ckpt)
 
@@ -209,7 +209,7 @@ def adversarial(vgg, pixelcnn, dataloader, n_bins, adversarial_range,
         x,y = Variable(x, requires_grad=True), Variable(y)
 
         # generate adversarial example
-        loss = torch.nn.NLLLoss2d()(vgg(x),y)
+        loss = torch.nn.CrossEntropyLoss()(vgg(x),y)
         dx = torch.autograd.grad(loss,x,create_graph=True)[0]
         adv_x = x+adversarial_range*torch.sign(dx)
 
