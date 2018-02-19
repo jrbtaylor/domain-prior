@@ -16,6 +16,7 @@ neural nets
     - recent literature on adversarial examples highlights the sensitivity of 
     deep neural nets to data outside the training distribution
 2. Epistemic uncertainty
+    - epistemic vs aleatoric uncertainty
 3. PixelCNNs as an image prior and using their loss as a proxy for uncertainty
 4. Adversarial examples
 5. Out-of-domain examples
@@ -56,4 +57,48 @@ their inputs.
 
 ## Epistemic Uncertainty
 
-The need for uncertainty in deep learning 
+The need for uncertainty in deep learning has been stressed before and some work
+exists on making neural nets more Bayesian.
+Bayesian deep learning puts a prior distribution over the weights and requires
+calculating the expectation over the distributions for all weights at inference,
+which is currently not computationally feasible on a large scale.
+
+The simpler approach is to continue to train deterministic networks with 
+gradient descent and exploit some hacks afterward that vaguely mimic uncertainty.
+The popular paper ["What Uncertainties Do We Need in Bayesian Deep Learning for Computer Vision?"](
+https://arxiv.org/abs/1703.04977) by Kendall and Gal, which is the focus of this 
+post, falls under this category.
+
+Note that Alex Kendall also covers the paper in a well-written and concise[blog post,](
+https://alexgkendall.com/computer_vision/bayesian_deep_learning_for_safe_ai/
+)which I wish more authors would do.
+Before I critique the work itself, I have to give the author credit &mdash; 
+the blog post is a great intro to uncertainty.
+
+The paper covers two common forms of uncertainty:
+1. Aleatoric: uncertainty with respect to information missing from the data;
+    e.g. occlusions in computer vision; usually task-specific and not depedent
+    on the amount of training data
+2. Epistemic: model uncertainty that can be explained away given enough data;
+    this is the focus of this post, as it allows us to say if an input matches 
+    the training distribution, where we can be reasonably confident
+    in our model.
+
+Aleatoric uncertainty is represented by adding a second set of outputs to 
+the model. 
+These uncertainty outputs down-weight the loss during training in exchange 
+for a regularizing penalty. 
+This allows the model to balance the trade-off of being completely certain, 
+(taking the full loss for wrong predictions), 
+with being uncertain (increasing the penalty) by learning which inputs lead to
+higher losses.
+
+The technique proposed for epistemic uncertainty estimates it as the prediction 
+variance sampled over multiple dropout masks at test.
+For the full derivation, the reader is encouraged to see the paper at the link above.
+Instead, I'll offer what I hope is a more intuitive explanation. 
+The approach can be understood as exploiting the same property of neural nets as 
+adversarial examples: outside the training distribution, the network exhibits
+highly non-linear and irregular behaviours.
+By applying dropout, we perturb the activations such that for inputs not captured
+in the training set, the resulting activations may exhibit higher variance. 
