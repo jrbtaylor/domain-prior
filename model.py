@@ -40,7 +40,6 @@ class VGG(nn.Module):
         for i in range(len(n_feat)-1):
             proj = nn.Linear(n_feat[i],n_feat[i+1])
             if i==len(n_feat)-2:
-                # act = nn.LogSoftmax(dim=1)
                 layer = nn.Sequential(nn.Dropout2d(dropout), proj)
             else:
                 act = nn.ReLU()
